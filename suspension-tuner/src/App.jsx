@@ -919,6 +919,21 @@ export default function App() {
     setErrors(e); const allT = {}; Object.keys(REQUIRED).forEach(k => (allT[k] = true)); setTouched(p => ({ ...p, ...allT }));
     return Object.keys(e).length === 0;
   }, [form]);
+  const applyFilters = useCallback((src, q, dateF) => {
+    let result = Array.isArray(src) ? src : [];
+    const qq = (q || "").trim().toLowerCase();
+    if (qq) {
+      result = result.filter(r =>
+        [r.license_plate, r.customer_name, r.car_model, r.shock_model, r.customer_phone, r.technician]
+          .some(s => (s || "").toLowerCase().includes(qq))
+      );
+    }
+    if (dateF) {
+      const days = dateF === "7d" ? 7 : dateF === "30d" ? 30 : dateF === "90d" ? 90 : 0;
+      if (days > 0) { const start = new Date(Date.now() - days * 864e5); result = result.filter(r => new Date(r.created_at) >= start); }
+    }
+    return result;
+  }, []);
   const fetchRecords = useCallback(async () => { if (!DB_OK) return; setLoading(true); const { data } = await api("suspension_records").select(); if (data) { setRecords(data); setFiltered(applyFilters(data, search, dateFilter)); } setLoading(false); }, [applyFilters, search, dateFilter]);
   useEffect(() => { fetchRecords(); }, [fetchRecords]);
 
@@ -936,31 +951,6 @@ export default function App() {
     const t = setTimeout(() => saveDraft(form), 800);
     return () => clearTimeout(t);
   }, [form, page, editingId]);
-
-  // 鍵盤快捷鍵 — 用 ref 確保始終拿到最新的 handler（避免閉包 form 過期）
-  const kbRef = useRef({});
-  kbRef.current = { handleSave, handleUpdate, editingId, page, saving, delConfirm, showCompare };
-  useEffect(() => {
-    const onKey = (e) => {
-      const s = kbRef.current;
-      if ((e.ctrlKey || e.metaKey) && e.key === "s") {
-        e.preventDefault();
-        if (s.page === "form" && !s.saving) { s.editingId ? s.handleUpdate() : s.handleSave(); }
-      }
-      else if ((e.ctrlKey || e.metaKey) && e.key === "n" && !e.shiftKey) {
-        e.preventDefault();
-        setPage("form"); setForm({ ...EMPTY }); setEditingId(null); setErrors({}); setTouched({});
-      }
-      else if (e.key === "Escape") {
-        if (s.delConfirm) { setDelConfirm(null); return; }
-        if (s.showCompare) { setShowCompare(false); return; }
-        if (s.page === "detail") setPage("history");
-        else if (s.page === "customerDetail") setPage("customers");
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
 
   const restoreDraft = () => {
     const d = loadDraft();
@@ -996,21 +986,6 @@ export default function App() {
     observer.observe(el);
     return () => observer.disconnect();
   }, [page, historyPage, filtered.length]);
-  const applyFilters = useCallback((src, q, dateF) => {
-    let result = Array.isArray(src) ? src : [];
-    const qq = (q || "").trim().toLowerCase();
-    if (qq) {
-      result = result.filter(r =>
-        [r.license_plate, r.customer_name, r.car_model, r.shock_model, r.customer_phone, r.technician]
-          .some(s => (s || "").toLowerCase().includes(qq))
-      );
-    }
-    if (dateF) {
-      const days = dateF === "7d" ? 7 : dateF === "30d" ? 30 : dateF === "90d" ? 90 : 0;
-      if (days > 0) { const start = new Date(Date.now() - days * 864e5); result = result.filter(r => new Date(r.created_at) >= start); }
-    }
-    return result;
-  }, []);
   const handleSearch = val => { setSearch(val); setFiltered(applyFilters(records, val, dateFilter)); setHistoryPage(1); };
   const handleDateFilter = val => { setDateFilter(val); setFiltered(applyFilters(records, search, val)); setHistoryPage(1); };
   const handleSave = async () => {
@@ -1084,6 +1059,31 @@ export default function App() {
       showToast("紀錄已更新！"); done(); fetchRecords();
     } setSaving(false);
   };
+
+  const kbRef = useRef({});
+  kbRef.current = { handleSave, handleUpdate, editingId, page, saving, delConfirm, showCompare };
+  useEffect(() => {
+    const onKey = (e) => {
+      const s = kbRef.current;
+      if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+        e.preventDefault();
+        if (s.page === "form" && !s.saving) { s.editingId ? s.handleUpdate() : s.handleSave(); }
+      }
+      else if ((e.ctrlKey || e.metaKey) && e.key === "n" && !e.shiftKey) {
+        e.preventDefault();
+        setPage("form"); setForm({ ...EMPTY }); setEditingId(null); setErrors({}); setTouched({});
+      }
+      else if (e.key === "Escape") {
+        if (s.delConfirm) { setDelConfirm(null); return; }
+        if (s.showCompare) { setShowCompare(false); return; }
+        if (s.page === "detail") setPage("history");
+        else if (s.page === "customerDetail") setPage("customers");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const errFor = f => (touched[f] && errors[f]) ? errors[f] : null;
   const missingN = Object.keys(REQUIRED).filter(k => !form[k] || !form[k].toString().trim()).length;
   const parseSymptoms = rec => safeParseSymptoms(rec?.symptoms);
