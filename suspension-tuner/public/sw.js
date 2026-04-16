@@ -1,4 +1,4 @@
-const CACHE_NAME = 'suspension-tuner-v1';
+const CACHE_NAME = 'suspension-tuner-v2';
 const STATIC_ASSETS = ['/', '/index.html'];
 
 self.addEventListener('install', (e) => {
@@ -27,21 +27,33 @@ function canCacheRequest(req) {
   }
 }
 
+/** Netlify SPA fallback: missing /assets/*.js still returns 200 text/html — never cache that as a script. */
+function shouldStoreResponse(req, res) {
+  if (!res.ok || !canCacheRequest(req)) return false;
+  const ct = (res.headers.get('content-type') || '').toLowerCase();
+  if (req.destination === 'script' && !ct.includes('javascript')) return false;
+  if (req.destination === 'style' && !ct.includes('css')) return false;
+  return true;
+}
+
 self.addEventListener('fetch', (e) => {
-  // Network first for API calls, cache first for static assets
   if (e.request.url.includes('/rest/v1/') || e.request.url.includes('supabase')) {
     e.respondWith(
       fetch(e.request).catch(() => caches.match(e.request))
     );
-  } else {
-    e.respondWith(
-      caches.match(e.request).then((r) => r || fetch(e.request).then((res) => {
-        if (canCacheRequest(e.request) && res.ok) {
+    return;
+  }
+
+  // Network-first: new deploys change hashed filenames; cache-first + stale index = HTML served as JS (MIME error).
+  e.respondWith(
+    fetch(e.request)
+      .then((res) => {
+        if (shouldStoreResponse(e.request, res)) {
           const clone = res.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(e.request, clone)).catch(() => {});
+          caches.open(CACHE_NAME).then((c) => c.put(e.request, clone)).catch(() => {});
         }
         return res;
-      }))
-    );
-  }
+      })
+      .catch(() => caches.match(e.request))
+  );
 });
