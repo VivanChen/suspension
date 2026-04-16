@@ -17,6 +17,16 @@ self.addEventListener('activate', (e) => {
   self.clients.claim();
 });
 
+function canCacheRequest(req) {
+  if (req.method !== 'GET') return false;
+  try {
+    const u = new URL(req.url);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 self.addEventListener('fetch', (e) => {
   // Network first for API calls, cache first for static assets
   if (e.request.url.includes('/rest/v1/') || e.request.url.includes('supabase')) {
@@ -26,8 +36,10 @@ self.addEventListener('fetch', (e) => {
   } else {
     e.respondWith(
       caches.match(e.request).then((r) => r || fetch(e.request).then((res) => {
-        const clone = res.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(e.request, clone));
+        if (canCacheRequest(e.request) && res.ok) {
+          const clone = res.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(e.request, clone)).catch(() => {});
+        }
         return res;
       }))
     );
