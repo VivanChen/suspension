@@ -2,7 +2,18 @@
   command = "npm run build"
   publish = "dist"
 
-# 讓瀏覽器一定向網路要新版 SW（避免舊 SW 把自己快取死）
+# 主入口不要長快取，否則舊 index 指到已刪除的 hashed chunk → 白畫面
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "no-store"
+
+[[headers]]
+  for = "/"
+  [headers.values]
+    Cache-Control = "no-store"
+
+# 舊客戶端若仍會抓 sw.js 做更新檢查
 [[headers]]
   for = "/sw.js"
   [headers.values]

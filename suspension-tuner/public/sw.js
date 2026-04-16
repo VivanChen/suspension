@@ -1,59 +1,15 @@
-const CACHE_NAME = 'suspension-tuner-v2';
-const STATIC_ASSETS = ['/', '/index.html'];
-
-self.addEventListener('install', (e) => {
-  e.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(STATIC_ASSETS))
-  );
+// 舊版 SW 曾用 cache-first 把錯誤的 HTML 當成 JS 快取，導致白畫面。
+// 此檔僅供「已註冊舊 SW 的瀏覽器」在更新檢查時載入：清掉 Cache Storage 並解除註冊。應用程式已不再註冊 SW。
+self.addEventListener('install', () => {
   self.skipWaiting();
 });
 
 self.addEventListener('activate', (e) => {
   e.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
-    )
-  );
-  self.clients.claim();
-});
-
-function canCacheRequest(req) {
-  if (req.method !== 'GET') return false;
-  try {
-    const u = new URL(req.url);
-    return u.protocol === 'http:' || u.protocol === 'https:';
-  } catch {
-    return false;
-  }
-}
-
-/** Netlify SPA fallback: missing /assets/*.js still returns 200 text/html — never cache that as a script. */
-function shouldStoreResponse(req, res) {
-  if (!res.ok || !canCacheRequest(req)) return false;
-  const ct = (res.headers.get('content-type') || '').toLowerCase();
-  if (req.destination === 'script' && !ct.includes('javascript')) return false;
-  if (req.destination === 'style' && !ct.includes('css')) return false;
-  return true;
-}
-
-self.addEventListener('fetch', (e) => {
-  if (e.request.url.includes('/rest/v1/') || e.request.url.includes('supabase')) {
-    e.respondWith(
-      fetch(e.request).catch(() => caches.match(e.request))
-    );
-    return;
-  }
-
-  // Network-first: new deploys change hashed filenames; cache-first + stale index = HTML served as JS (MIME error).
-  e.respondWith(
-    fetch(e.request)
-      .then((res) => {
-        if (shouldStoreResponse(e.request, res)) {
-          const clone = res.clone();
-          caches.open(CACHE_NAME).then((c) => c.put(e.request, clone)).catch(() => {});
-        }
-        return res;
-      })
-      .catch(() => caches.match(e.request))
+    caches
+      .keys()
+      .then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
+      .then(() => self.registration.unregister())
+      .catch(() => self.registration.unregister())
   );
 });
