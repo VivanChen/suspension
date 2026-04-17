@@ -1,15 +1,35 @@
-// 舊版 SW 曾用 cache-first 把錯誤的 HTML 當成 JS 快取，導致白畫面。
-// 此檔僅供「已註冊舊 SW 的瀏覽器」在更新檢查時載入：清掉 Cache Storage 並解除註冊。應用程式已不再註冊 SW。
-self.addEventListener('install', () => {
+const CACHE_NAME = 'suspension-tuner-v1';
+const STATIC_ASSETS = ['/', '/index.html'];
+
+self.addEventListener('install', (e) => {
+  e.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(STATIC_ASSETS))
+  );
   self.skipWaiting();
 });
 
 self.addEventListener('activate', (e) => {
   e.waitUntil(
-    caches
-      .keys()
-      .then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
-      .then(() => self.registration.unregister())
-      .catch(() => self.registration.unregister())
+    caches.keys().then((keys) =>
+      Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
+    )
   );
+  self.clients.claim();
+});
+
+self.addEventListener('fetch', (e) => {
+  // Network first for API calls, cache first for static assets
+  if (e.request.url.includes('/rest/v1/') || e.request.url.includes('supabase')) {
+    e.respondWith(
+      fetch(e.request).catch(() => caches.match(e.request))
+    );
+  } else {
+    e.respondWith(
+      caches.match(e.request).then((r) => r || fetch(e.request).then((res) => {
+        const clone = res.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(e.request, clone));
+        return res;
+      }))
+    );
+  }
 });

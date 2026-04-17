@@ -2,24 +2,7 @@
   command = "npm run build"
   publish = "dist"
 
-# 主入口不要長快取，否則舊 index 指到已刪除的 hashed chunk → 白畫面
-[[headers]]
-  for = "/index.html"
-  [headers.values]
-    Cache-Control = "no-store"
-
-[[headers]]
-  for = "/"
-  [headers.values]
-    Cache-Control = "no-store"
-
-# 舊客戶端若仍會抓 sw.js 做更新檢查
-[[headers]]
-  for = "/sw.js"
-  [headers.values]
-    Cache-Control = "no-store"
-
-# SPA fallback：Netlify 仍會先對 publish 內實體檔案短路；這裡只接住「沒有對應檔」的路徑
+# SPA fallback — 所有路由導回 index.html
 [[redirects]]
   from = "/*"
   to = "/index.html"

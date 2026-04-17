@@ -524,10 +524,14 @@ function asymmetricOscillation(t, axisPhysics) {
 function SuspensionSim({ params, label, compact, autoReplay }) {
   const canvasRef = useRef(null);
   const animRef = useRef(null);
-  const stRef = useRef({ time: 0, bumping: false, bumpStart: 0 });
+  const stRef = useRef({ time: 0, bumping: false, bumpStart: 0, driving: false, speed: 60, roadType: "smooth", corner: 0, brake: 0 });
   const physics = usePhysics(params);
   const lastSigRef = useRef("");
   const [continuousOn, setContinuousOn] = useState(false);
+  const [driveState, setDriveState] = useState({ driving: false, speed: 60, roadType: "smooth", corner: 0, brake: 0 });
+
+  // 同步 UI state 到 ref（動畫迴圈讀 ref）
+  useEffect(() => { Object.assign(stRef.current, driveState); }, [driveState]);
 
   const triggerBump = useCallback(() => { stRef.current.bumping = true; stRef.current.bumpStart = stRef.current.time; stRef.current.continuous = false; setContinuousOn(false); }, []);
   const triggerContinuous = useCallback(() => {
@@ -542,6 +546,34 @@ function SuspensionSim({ params, label, compact, autoReplay }) {
       stRef.current.continuous = true;
       setContinuousOn(true);
     }
+  }, []);
+  const toggleDriving = useCallback(() => {
+    setDriveState(s => {
+      if (s.driving) {
+        // 停止時重置所有行駛狀態
+        stRef.current.nextBumpTime = 0;
+        stRef.current.currentRoll = 0;
+        stRef.current.currentBrakePitch = 0;
+        stRef.current.comfortAvg = 0;
+        stRef.current.bumping = false;
+        stRef.current.continuous = false;
+        setContinuousOn(false);
+        return { driving: false, speed: 60, roadType: "smooth", corner: 0, brake: 0 };
+      }
+      return { ...s, driving: true, corner: 0, brake: 0 };
+    });
+  }, []);
+  const setSpeed = useCallback((speed) => setDriveState(s => ({ ...s, speed })), []);
+  const setRoadType = useCallback((roadType) => setDriveState(s => ({ ...s, roadType })), []);
+  const pulseCorner = useCallback((dir) => {
+    // dir: 1 = 右轉，-1 = 左轉，0 = 回正
+    setDriveState(s => ({ ...s, corner: dir }));
+    if (dir !== 0) setTimeout(() => setDriveState(s => ({ ...s, corner: 0 })), 2500);
+  }, []);
+  const pulseBrake = useCallback((dir) => {
+    // dir: 1 = 煞車（車頭下壓），-1 = 加速（車頭抬升）
+    setDriveState(s => ({ ...s, brake: dir }));
+    if (dir !== 0) setTimeout(() => setDriveState(s => ({ ...s, brake: 0 })), 1500);
   }, []);
 
   // 當主要參數變化時，自動觸發衝擊測試（讓使用者立即看到差異）
@@ -570,25 +602,29 @@ function SuspensionSim({ params, label, compact, autoReplay }) {
       let frontDisp = 0, rearDisp = 0, frontVel = 0, rearVel = 0;
       let frontWheelDisp = 0, rearWheelDisp = 0;
 
-      if (st.bumping) {
-        const el = t - st.bumpStart;
-        // 連續模式：每 1.2 秒重新觸發一次衝擊（像連續減速島）
-        let elFront = el, elRear = Math.max(0, el - 0.2);
-        if (st.continuous) {
-          const period = 1.2;
-          elFront = el % period;
-          elRear = Math.max(0, (el - 0.2) % period);
-        }
-        const fResult = asymmetricOscillation(elFront, front);
-        const rResult = asymmetricOscillation(elRear, rear);
-        frontDisp = fResult.x; frontVel = fResult.v;
-        rearDisp = rResult.x; rearVel = rResult.v;
-        // 輪子位移
-        frontWheelDisp = front.baseAmp * 0.25 * Math.exp(-front.dampingRatio * front.natFreq * 2 * Math.PI * elFront) * Math.sin(front.natFreq * 2 * Math.PI * elFront * 1.8);
-        rearWheelDisp = rear.baseAmp * 0.25 * Math.exp(-rear.dampingRatio * rear.natFreq * 2 * Math.PI * elRear) * Math.sin(rear.natFreq * 2 * Math.PI * elRear * 1.8);
-        // 停止條件（非連續模式）
-        if (!st.continuous && el > 6 && Math.abs(frontDisp) < 0.3 && Math.abs(rearDisp) < 0.3) st.bumping = false;
-      } else {
+      // ─── 行駛模式底層振動 ───
+      if (st.driving) {
+        const speedFactor = (st.speed || 60) / 60;
+        const wb_delay = Math.max(0.08, 0.3 / speedFactor);
+        const rp = {
+          smooth: { amp: 1.2, freq: 3.5, rnd: 0.3 },
+          rough:  { amp: 4.5, freq: 6.0, rnd: 1.2 },
+          wavy:   { amp: 7.0, freq: 1.8, rnd: 0.5 },
+          bumpy:  { amp: 10.0, freq: 2.4, rnd: 2.0 },
+        }[st.roadType || "smooth"] || { amp: 1.2, freq: 3.5, rnd: 0.3 };
+        const inAmp = rp.amp * Math.pow(speedFactor, 0.7);
+        const rFreq = rp.freq * speedFactor;
+        const rF = Math.sin(t * rFreq * 7.3) * rp.rnd + Math.sin(t * rFreq * 3.1) * rp.rnd * 0.7;
+        const rR = Math.sin((t - wb_delay) * rFreq * 7.3) * rp.rnd + Math.sin((t - wb_delay) * rFreq * 3.1) * rp.rnd * 0.7;
+        const frResp = inAmp / (1 + front.dampingRatio * 5) * (1 / (1 + Math.pow(rFreq / Math.max(0.5, front.natFreq), 2)));
+        const rrResp = inAmp / (1 + rear.dampingRatio * 5) * (1 / (1 + Math.pow(rFreq / Math.max(0.5, rear.natFreq), 2)));
+        frontDisp = frResp * Math.sin(t * rFreq * 2 * Math.PI) + rF;
+        rearDisp = rrResp * Math.sin((t - wb_delay) * rFreq * 2 * Math.PI) + rR;
+        frontVel = frResp * rFreq * 2 * Math.PI * Math.cos(t * rFreq * 2 * Math.PI);
+        rearVel = rrResp * rFreq * 2 * Math.PI * Math.cos((t - wb_delay) * rFreq * 2 * Math.PI);
+        frontWheelDisp = (rF + Math.sin(t * rFreq * 4) * inAmp * 0.3) * 0.4;
+        rearWheelDisp = (rR + Math.sin((t - wb_delay) * rFreq * 4) * inAmp * 0.3) * 0.4;
+      } else if (!st.bumping) {
         // 待機微震
         frontDisp = Math.sin(t * 2) * 0.8;
         rearDisp = Math.sin(t * 2 + 0.3) * 0.7;
@@ -596,18 +632,144 @@ function SuspensionSim({ params, label, compact, autoReplay }) {
         rearWheelDisp = Math.sin(t * 3.2) * 0.35;
       }
 
-      // 車身傾斜：前後位移不同 → 車頭抬高或壓低（點頭效應）
-      const pitch = (rearDisp - frontDisp) * 0.3; // 弧度感
-      const carY = baseCarY + (frontDisp + rearDisp) / 2;
+      // ─── 衝擊疊加（可在行駛中觸發 = 路上碰到坑洞）───
+      if (st.bumping) {
+        const el = t - st.bumpStart;
+        let elF = el, elR = Math.max(0, el - (st.driving ? Math.max(0.08, 0.3 / ((st.speed || 60) / 60)) : 0.2));
+        if (st.continuous) { const p = 1.2; elF = el % p; elR = Math.max(0, (el - 0.2) % p); }
+        const fR = asymmetricOscillation(elF, front);
+        const rR = asymmetricOscillation(elR, rear);
+        frontDisp += fR.x; frontVel += fR.v;
+        rearDisp += rR.x; rearVel += rR.v;
+        frontWheelDisp += front.baseAmp * 0.25 * Math.exp(-front.dampingRatio * front.natFreq * 2 * Math.PI * elF) * Math.sin(front.natFreq * 2 * Math.PI * elF * 1.8);
+        rearWheelDisp += rear.baseAmp * 0.25 * Math.exp(-rear.dampingRatio * rear.natFreq * 2 * Math.PI * elR) * Math.sin(rear.natFreq * 2 * Math.PI * elR * 1.8);
+        if (!st.continuous && el > 6 && Math.abs(fR.x) < 0.3 && Math.abs(rR.x) < 0.3) st.bumping = false;
+      }
+
+      // ─── 舒適度追蹤（滑動平均）───
+      const magNow = Math.max(Math.abs(frontDisp), Math.abs(rearDisp));
+      st.comfortAvg = (st.comfortAvg || 0) * 0.97 + magNow * 0.03;
+      const comfortScore = st.comfortAvg;
+      const comfortLabel = comfortScore > 18 ? "⛔ 不適" : comfortScore > 10 ? "⚠ 尚可" : comfortScore > 4 ? "△ 可接受" : "✓ 舒適";
+      const comfortColor = comfortScore > 18 ? "#ef4444" : comfortScore > 10 ? "#f59e0b" : comfortScore > 4 ? "#3b82f6" : "#22c55e";
+
+      // ─── 側傾（過彎）& 煞車俯仰 ───
+      const speedNorm = st.driving ? (st.speed || 60) / 60 : 1;
+      const targetRoll = (st.corner || 0) * speedNorm * speedNorm * 8;
+      st.currentRoll = (st.currentRoll || 0) + (targetRoll - (st.currentRoll || 0)) * 0.08;
+      const roll = st.currentRoll;
+      const targetBrakePitch = (st.brake || 0) * 6;
+      st.currentBrakePitch = (st.currentBrakePitch || 0) + (targetBrakePitch - (st.currentBrakePitch || 0)) * 0.1;
+      const brakePitch = st.currentBrakePitch;
+
+      // 車身傾斜 + 俯仰
+      const pitch = (rearDisp - frontDisp) * 0.3 + brakePitch * 0.3;
+      const carY = baseCarY + (frontDisp + rearDisp) / 2 + brakePitch * 0.5;
       const wYfront = roadY - 20 + frontWheelDisp * 0.3;
       const wYrear = roadY - 20 + rearWheelDisp * 0.3;
 
-      // Road
-      ctx.strokeStyle = "#1e293b"; ctx.lineWidth = 2; ctx.beginPath();
-      for (let x = 0; x < W; x++) ctx.lineTo(x, roadY + Math.sin((x + t * 20) * 0.05) * 3);
-      ctx.stroke(); ctx.fillStyle = "#0a0e18"; ctx.fillRect(0, roadY + 6, W, H);
-      ctx.strokeStyle = "#f59e0b22"; ctx.lineWidth = 2; ctx.setLineDash([16, 24]);
-      ctx.beginPath(); ctx.moveTo(0, roadY + 14); ctx.lineTo(W, roadY + 14); ctx.stroke(); ctx.setLineDash([]);
+      // ─── 荷重轉移（煞車時前輪多承重，加速時後輪多承重）───
+      const baseRatio = front.sp / (front.sp + rear.sp); // 前軸比例
+      const loadTransfer = (st.brake || 0) * 0.12 + (roll ? roll * 0.01 : 0);
+      const frontLoad = Math.min(0.85, Math.max(0.15, baseRatio + loadTransfer));
+      const rearLoad = 1 - frontLoad;
+
+      // Road scroll（定義在背景前，背景和路面都用到）
+      const roadScroll = st.driving ? t * (st.speed || 60) * 1.5 : t * 20;
+
+      // ─── 背景景物（行駛時有速度感）───
+      if (st.driving) {
+        const scroll = roadScroll * 0.15;
+        // 遠山（視差慢）
+        ctx.fillStyle = "#0a1020";
+        ctx.beginPath(); ctx.moveTo(0, roadY - 50);
+        for (let x = 0; x < W; x += 3) ctx.lineTo(x, roadY - 50 - Math.sin((x + scroll * 0.1) * 0.008) * 25 - Math.sin((x + scroll * 0.1) * 0.019) * 12);
+        ctx.lineTo(W, roadY); ctx.lineTo(0, roadY); ctx.fill();
+        // 路燈（近景快速移動）
+        ctx.strokeStyle = "#1e293b"; ctx.lineWidth = 3;
+        for (let i = 0; i < 8; i++) {
+          const lx = ((i * 180 - scroll * 0.6) % (W + 200)) - 100;
+          if (lx < -30 || lx > W + 30) continue;
+          ctx.beginPath(); ctx.moveTo(lx, roadY - 80); ctx.lineTo(lx, roadY);
+          ctx.stroke();
+          ctx.fillStyle = "#fbbf2433"; ctx.beginPath();
+          ctx.ellipse(lx + 12, roadY - 78, 8, 4, 0, 0, Math.PI * 2); ctx.fill();
+        }
+        // 隨機撞坑（路況越差越頻繁，平順路面不撞）
+        if (st.roadType !== "smooth") {
+          const bumpInterval = st.roadType === "bumpy" ? 2 : st.roadType === "wavy" ? 4 : 6;
+          if (!st.nextBumpTime) st.nextBumpTime = t + bumpInterval + Math.random() * bumpInterval;
+          if (t > st.nextBumpTime) {
+            st.bumping = true;
+            st.bumpStart = t;
+            st.continuous = false;
+            st.nextBumpTime = t + bumpInterval * 0.5 + Math.random() * bumpInterval;
+          }
+        }
+      }
+
+      // Road — 路況影響紋理與顏色
+      const roadProfile = {
+        smooth:   { amplitude: 1.5, freq: 0.04, color: "#1e293b" },
+        rough:    { amplitude: 4.0, freq: 0.14, color: "#2a2520" },
+        wavy:     { amplitude: 6.0, freq: 0.03, color: "#1e293b" },
+        bumpy:    { amplitude: 8.0, freq: 0.08, color: "#2e2318" },
+      }[st.roadType || "smooth"] || { amplitude: 1.5, freq: 0.04, color: "#1e293b" };
+      ctx.strokeStyle = roadProfile.color; ctx.lineWidth = 2; ctx.beginPath();
+      for (let x = 0; x < W; x++) {
+        const texture = Math.sin((x + roadScroll) * roadProfile.freq) * roadProfile.amplitude
+                      + (st.roadType === "bumpy" ? Math.sin((x + roadScroll) * 0.31) * 2 : 0);
+        ctx.lineTo(x, roadY + texture);
+      }
+      ctx.stroke();
+      // 路面填充色
+      const roadFill = st.roadType === "bumpy" ? "#0d0a06" : st.roadType === "rough" ? "#0b0908" : "#0a0e18";
+      ctx.fillStyle = roadFill; ctx.fillRect(0, roadY + 6, W, H);
+      // 碎石/裂縫紋理（粗糙 & 顛簸路面）
+      if (st.driving && (st.roadType === "rough" || st.roadType === "bumpy")) {
+        ctx.fillStyle = "#ffffff08";
+        for (let i = 0; i < 12; i++) {
+          const cx2 = ((i * 53 + roadScroll * 0.4) % W);
+          ctx.fillRect(cx2, roadY + 7 + (i % 3) * 2, 2, 1);
+        }
+      }
+      // 撞坑閃光（撞到坑洞的瞬間視覺回饋）
+      if (st.driving && st.bumping && (t - st.bumpStart) < 0.3) {
+        ctx.fillStyle = "#ef444466";
+        ctx.beginPath();
+        ctx.moveTo(cx + 60, roadY);
+        ctx.quadraticCurveTo(cx + 80, roadY + 8, cx + 100, roadY);
+        ctx.fill();
+      }
+      // 車道線動態捲動
+      ctx.strokeStyle = "#f59e0b22"; ctx.lineWidth = 2;
+      const dashOffset = st.driving ? -(roadScroll * 0.6) % 40 : 0;
+      ctx.setLineDash([16, 24]); ctx.lineDashOffset = dashOffset;
+      ctx.beginPath(); ctx.moveTo(0, roadY + 14); ctx.lineTo(W, roadY + 14); ctx.stroke();
+      ctx.setLineDash([]); ctx.lineDashOffset = 0;
+
+      // 彎路指示：過彎時顯示離心力箭頭
+      if (st.driving && Math.abs(st.corner || 0) > 0.1) {
+        const arrowX = W / 2;
+        const arrowDir = st.corner > 0 ? 1 : -1;
+        ctx.strokeStyle = "#f59e0b"; ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(arrowX, 30);
+        ctx.lineTo(arrowX + arrowDir * 60, 30);
+        ctx.moveTo(arrowX + arrowDir * 60, 30);
+        ctx.lineTo(arrowX + arrowDir * 50, 22);
+        ctx.moveTo(arrowX + arrowDir * 60, 30);
+        ctx.lineTo(arrowX + arrowDir * 50, 38);
+        ctx.stroke();
+        ctx.fillStyle = "#f59e0b"; ctx.font = "bold 12px 'Noto Sans TC'"; ctx.textAlign = "center";
+        ctx.fillText(arrowDir > 0 ? "右轉 →" : "← 左轉", arrowX + arrowDir * 30, 18);
+      }
+      // 煞車/加速指示
+      if (st.driving && Math.abs(st.brake || 0) > 0.1) {
+        ctx.fillStyle = st.brake > 0 ? "#ef4444" : "#22c55e"; ctx.font = "bold 12px 'Noto Sans TC'";
+        ctx.textAlign = "center";
+        ctx.fillText(st.brake > 0 ? "🛑 煞車" : "⚡ 加速", W / 2, H - 24);
+      }
 
       // 衝擊波標示（前輪先、後輪後）
       if (st.bumping) {
@@ -639,12 +801,13 @@ function SuspensionSim({ params, label, compact, autoReplay }) {
       const rearY = carY - pitch * 30;
 
       // 繪製懸吊柱（壓縮/伸展用顏色區別）
+      const isActive = st.bumping || st.driving;
       const drawStrut = (x, carAttachY, wheelY, velocity, axisData) => {
         const top = carAttachY + 42, bot = wheelY - 8;
         const len = bot - top;
         // 阻尼筒顏色：壓縮=紅、伸展=藍、靜止=灰
         let strutColor = "#64748b";
-        if (st.bumping) {
+        if (isActive) {
           if (velocity > 1) strutColor = "#3b82f6"; // 伸展（往上拉）
           else if (velocity < -1) strutColor = "#ef4444"; // 壓縮（被壓）
         }
@@ -686,20 +849,21 @@ function SuspensionSim({ params, label, compact, autoReplay }) {
       ctx.restore();
 
       // Wheels
+      const wheelSpin = st.driving ? t * Math.max(2, (st.speed || 60) / 10) : t * 2;
       const drawWheel = (x, y) => {
         ctx.fillStyle = "#0f172a"; ctx.strokeStyle = "#334155"; ctx.lineWidth = 7;
         ctx.beginPath(); ctx.arc(x, y, 17, 0, Math.PI*2); ctx.fill(); ctx.stroke();
         ctx.fillStyle = "#475569"; ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI*2); ctx.fill();
         ctx.strokeStyle = "#64748b"; ctx.lineWidth = 1.5;
-        for (let i = 0; i < 5; i++) { const a = (Math.PI*2*i)/5 + t*2;
+        for (let i = 0; i < 5; i++) { const a = (Math.PI*2*i)/5 + wheelSpin;
           ctx.beginPath(); ctx.moveTo(x+Math.cos(a)*6, y+Math.sin(a)*6); ctx.lineTo(x+Math.cos(a)*14, y+Math.sin(a)*14); ctx.stroke(); }
       };
       drawWheel(cx + 80, wYfront); drawWheel(cx - 80, wYrear);
 
-      // 觸底警告（壓縮行程超過 80% 時閃紅）
-      const frontCompRatio = Math.max(0, -frontDisp) / front.baseAmp;
-      const rearCompRatio = Math.max(0, -rearDisp) / rear.baseAmp;
-      if (st.bumping && (frontCompRatio > 0.9 || rearCompRatio > 0.9)) {
+      // 觸底警告（壓縮行程超過 90%）
+      const frontCompRatio = Math.max(0, -frontDisp) / Math.max(1, front.baseAmp);
+      const rearCompRatio = Math.max(0, -rearDisp) / Math.max(1, rear.baseAmp);
+      if (isActive && (frontCompRatio > 0.9 || rearCompRatio > 0.9)) {
         ctx.fillStyle = `rgba(239,68,68,${0.2 + Math.sin(t * 20) * 0.2})`;
         ctx.fillRect(0, 0, W, H);
         ctx.fillStyle = "#ef4444"; ctx.font = "bold 13px 'Noto Sans TC'"; ctx.textAlign = "center";
@@ -711,19 +875,58 @@ function SuspensionSim({ params, label, compact, autoReplay }) {
       const clr = totalMag > 25 ? "#ef4444" : totalMag > 12 ? "#f59e0b" : "#22c55e";
       ctx.fillStyle = clr; ctx.font = "bold 13px 'JetBrains Mono',monospace"; ctx.textAlign = "left";
       ctx.fillText(`前: ${Math.abs(frontDisp).toFixed(1)}mm  後: ${Math.abs(rearDisp).toFixed(1)}mm`, 14, 22);
+      // 振幅條
       ctx.fillStyle = "#1e293b"; ctx.beginPath(); ctx.roundRect(14, 28, 140, 8, 4); ctx.fill();
       ctx.fillStyle = clr; ctx.beginPath(); ctx.roundRect(14, 28, Math.min(140, totalMag*2.8), 8, 4); ctx.fill();
-      const stat = totalMag > 25 ? "⚠ 過度晃動" : totalMag > 12 ? "△ 偏軟" : "✓ 穩定";
-      ctx.fillStyle = clr; ctx.font = "bold 11px 'Noto Sans TC',sans-serif"; ctx.fillText(stat, 14, 52);
+      // 舒適度評分（滑動平均 — 比瞬間值更有參考性）
+      ctx.fillStyle = comfortColor; ctx.font = "bold 11px 'Noto Sans TC',sans-serif";
+      ctx.fillText(`${comfortLabel} (avg ${comfortScore.toFixed(1)}mm)`, 14, 52);
       // 點頭指示
       if (Math.abs(pitch) > 0.05) {
         ctx.fillStyle = "#fbbf24"; ctx.font = "10px 'Noto Sans TC'";
         ctx.fillText(pitch > 0 ? "↗ 車頭抬升" : "↘ 車頭下壓", 14, 68);
       }
-      if (st.bumping) {
+      if (st.bumping && !st.driving) {
         ctx.fillStyle = "#94a3b8"; ctx.font = "10px 'JetBrains Mono'";
         const maxOsc = Math.max(front.oscillations, rear.oscillations);
         ctx.fillText(`預估回彈 ${maxOsc === 99 ? "∞" : `≈ ${maxOsc}`} 次`, 14, 84);
+      }
+      // 行駛模式 HUD
+      if (st.driving) {
+        const gForce = Math.abs(roll) / 8;
+        const brakeG = Math.abs(brakePitch) / 6;
+        ctx.fillStyle = "#22c55e"; ctx.font = "bold 11px 'JetBrains Mono',monospace"; ctx.textAlign = "left";
+        ctx.fillText(`🚗 ${st.speed || 60}km/h`, 14, 84);
+        const roadLabels = { smooth: "平順", rough: "碎震", wavy: "起伏", bumpy: "顛簸" };
+        ctx.fillStyle = "#94a3b8"; ctx.font = "10px 'Noto Sans TC'";
+        ctx.fillText(`路面：${roadLabels[st.roadType] || "平順"}`, 14, 100);
+        if (gForce > 0.1) {
+          ctx.fillStyle = gForce > 0.8 ? "#ef4444" : gForce > 0.5 ? "#f59e0b" : "#22c55e";
+          ctx.fillText(`側傾 ${Math.abs(roll).toFixed(1)}° (${gForce.toFixed(2)}G)`, 14, 116);
+        }
+        if (brakeG > 0.1) {
+          ctx.fillStyle = brakeG > 0.7 ? "#ef4444" : "#f59e0b";
+          ctx.fillText(`${brakePitch > 0 ? "俯衝" : "抬頭"} ${brakeG.toFixed(2)}G`, 14, 132);
+        }
+        // 行駛診斷（技師看得懂的建議）
+        let diagY = 148;
+        ctx.font = "9px 'Noto Sans TC'";
+        const diag = [];
+        if (comfortScore > 15 && st.roadType === "smooth") diag.push({ c: "#ef4444", t: "平路仍晃 → 阻尼偏軟或彈簧不足" });
+        if (comfortScore > 12 && (st.roadType === "rough" || st.roadType === "bumpy")) diag.push({ c: "#f59e0b", t: "碎震跳動大 → 增加壓縮阻尼" });
+        if (comfortScore < 3 && (st.speed || 60) > 80) diag.push({ c: "#22c55e", t: "高速穩定，適合長途巡航" });
+        if (Math.abs(roll) > 5) diag.push({ c: "#f59e0b", t: "側傾偏大 → 考慮加粗防傾桿" });
+        if (Math.abs(brakePitch) > 4) diag.push({ c: "#f59e0b", t: brakePitch > 0 ? "煞車俯衝大 → 前彈簧偏軟" : "加速抬頭 → 後彈簧偏軟" });
+        diag.slice(0, 2).forEach(d => { ctx.fillStyle = d.c; ctx.fillText(d.t, 14, diagY); diagY += 14; });
+        // 荷重轉移條（底部）
+        const barW = 160, barH = 8, barX = W / 2 - barW / 2, barY = H - 20;
+        ctx.fillStyle = "#1e293b"; ctx.beginPath(); ctx.roundRect(barX, barY, barW, barH, 4); ctx.fill();
+        const fPx = barW * frontLoad;
+        ctx.fillStyle = "#3b82f6"; ctx.beginPath(); ctx.roundRect(barX, barY, fPx, barH, 4); ctx.fill();
+        ctx.fillStyle = "#f59e0b"; ctx.beginPath(); ctx.roundRect(barX + fPx, barY, barW - fPx, barH, 4); ctx.fill();
+        ctx.fillStyle = "#e2e8f0"; ctx.font = "9px 'JetBrains Mono'"; ctx.textAlign = "center";
+        ctx.fillText(`前 ${(frontLoad*100).toFixed(0)}%`, barX + fPx / 2, barY - 3);
+        ctx.fillText(`後 ${(rearLoad*100).toFixed(0)}%`, barX + fPx + (barW - fPx) / 2, barY - 3);
       }
       if (!compact) {
         ctx.fillStyle = "#64748b"; ctx.font = "10px 'JetBrains Mono',monospace"; ctx.textAlign = "right";
@@ -737,7 +940,7 @@ function SuspensionSim({ params, label, compact, autoReplay }) {
       if (label) { ctx.fillStyle = label === "調整前" ? "#ef4444" : "#22c55e"; ctx.font = "bold 14px 'Noto Sans TC'"; ctx.textAlign = "center"; ctx.fillText(label, W/2, H-10); }
 
       // 阻尼方向指示（壓縮/伸展箭頭）
-      if (st.bumping && !compact) {
+      if (isActive && !compact) {
         const showArrow = (x, vel) => {
           if (Math.abs(vel) < 2) return;
           const up = vel > 0;
@@ -757,13 +960,85 @@ function SuspensionSim({ params, label, compact, autoReplay }) {
     return () => cancelAnimationFrame(animRef.current);
   }, [physics, label, compact]);
 
+  // 行駛場景預設：一鍵自動模擬
+  const runScenario = useCallback((scenario) => {
+    setDriveState(s => ({ ...s, driving: true, ...scenario.initial }));
+    if (scenario.events) {
+      scenario.events.forEach(ev => {
+        setTimeout(() => {
+          if (ev.corner !== undefined) pulseCorner(ev.corner);
+          if (ev.brake !== undefined) pulseBrake(ev.brake);
+          if (ev.bump) { stRef.current.bumping = true; stRef.current.bumpStart = stRef.current.time; stRef.current.continuous = false; }
+          if (ev.speed !== undefined) setSpeed(ev.speed);
+          if (ev.road !== undefined) setRoadType(ev.road);
+        }, ev.at);
+      });
+    }
+  }, [pulseCorner, pulseBrake, setSpeed, setRoadType]);
+
+  const SCENARIOS = useMemo(() => [
+    { name: "🏎 高速巡航", desc: "120km/h 平順路面", initial: { speed: 120, roadType: "smooth" }, events: [
+      { at: 2000, road: "rough" }, { at: 5000, road: "smooth" }, { at: 7000, bump: true }, { at: 9000, brake: 1 },
+    ]},
+    { name: "⛰ 山路連彎", desc: "60km/h 起伏+連續彎", initial: { speed: 60, roadType: "wavy" }, events: [
+      { at: 1500, corner: 1 }, { at: 4000, corner: -1 }, { at: 6500, corner: 1 }, { at: 8000, brake: 1 }, { at: 9500, corner: -1 },
+    ]},
+    { name: "🏙 市區走停", desc: "40km/h 碎震+紅綠燈", initial: { speed: 40, roadType: "rough" }, events: [
+      { at: 2000, brake: 1 }, { at: 4000, brake: -1 }, { at: 5500, bump: true }, { at: 7000, brake: 1 }, { at: 9000, speed: 60, road: "smooth" },
+    ]},
+    { name: "🚜 鄉道顛簸", desc: "35km/h 產業道路", initial: { speed: 35, roadType: "bumpy" }, events: [
+      { at: 1500, bump: true }, { at: 3500, bump: true }, { at: 5000, corner: -1 }, { at: 6500, bump: true }, { at: 8000, brake: 1 },
+    ]},
+  ], []);
+
   return (
     <div style={{ position: "relative" }}>
-      <canvas ref={canvasRef} width={600} height={compact ? 240 : 320} style={{ width: "100%", height: "auto", borderRadius: 12, border: "1px solid #1e293b", display: "block" }} />
+      <canvas ref={canvasRef} width={600} height={compact ? 240 : 360} style={{ width: "100%", height: "auto", borderRadius: 12, border: "1px solid #1e293b", display: "block" }} />
       <div style={{position:"absolute",bottom:12,right:12,display:"flex",gap:6}}>
         <button onClick={triggerContinuous} style={{...S.contBumpBtn, ...(continuousOn ? {background:"#3b82f6",color:"#fff",borderColor:"#3b82f6"}:{})}} title={continuousOn?"點擊停止":"連續路面（減速島、碎震路）"}>🌊{continuousOn ? " ON" : ""}</button>
-        <button onClick={triggerBump} style={S.bumpBtn}>💥 衝擊測試</button>
+        <button onClick={triggerBump} style={S.bumpBtn}>{driveState.driving ? "🕳 坑洞！" : "💥 衝擊測試"}</button>
       </div>
+      {/* 行駛模式控制面板 */}
+      {!compact && (
+        <div style={S.driveCtrl}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8,flexWrap:"wrap"}}>
+            <button onClick={toggleDriving} style={{...S.driveToggle,...(driveState.driving?{background:"#22c55e",color:"#0f172a",borderColor:"#22c55e"}:{})}}>{driveState.driving ? "■ 停止" : "🚗 開始行駛"}</button>
+            {driveState.driving && (
+              <div style={{display:"flex",alignItems:"center",gap:6,flex:"1 1 160px"}}>
+                <span style={{color:"#94a3b8",fontSize:11}}>時速</span>
+                <input type="range" min="20" max="140" step="5" value={driveState.speed} onChange={(e)=>setSpeed(Number(e.target.value))} style={{flex:1,accentColor:"#f59e0b"}} />
+                <span style={{color:"#f59e0b",fontSize:12,fontWeight:700,fontFamily:"'JetBrains Mono'",minWidth:54,textAlign:"right"}}>{driveState.speed}km/h</span>
+              </div>
+            )}
+          </div>
+          {driveState.driving && (
+            <>
+              <div style={{display:"flex",gap:4,marginBottom:6,flexWrap:"wrap"}}>
+                <span style={{color:"#64748b",fontSize:11,alignSelf:"center",marginRight:4}}>路況：</span>
+                {[{v:"smooth",l:"🛣 平順"},{v:"rough",l:"🚧 碎震"},{v:"wavy",l:"🌊 起伏"},{v:"bumpy",l:"⛰ 顛簸"}].map(r => (
+                  <button key={r.v} onClick={()=>setRoadType(r.v)} style={{...S.roadChip,...(driveState.roadType===r.v?{background:"#f59e0b",color:"#0f172a",borderColor:"#f59e0b"}:{})}}>{r.l}</button>
+                ))}
+              </div>
+              <div style={{display:"flex",gap:6,marginBottom:6,flexWrap:"wrap"}}>
+                <span style={{color:"#64748b",fontSize:11,alignSelf:"center",marginRight:4}}>動作：</span>
+                <button onClick={()=>pulseCorner(-1)} style={S.actionBtn}>← 左彎</button>
+                <button onClick={()=>pulseCorner(1)} style={S.actionBtn}>右彎 →</button>
+                <button onClick={()=>pulseBrake(1)} style={{...S.actionBtn,borderColor:"#ef444466",color:"#fca5a5"}}>🛑 煞車</button>
+                <button onClick={()=>pulseBrake(-1)} style={{...S.actionBtn,borderColor:"#22c55e66",color:"#86efac"}}>⚡ 加速</button>
+              </div>
+            </>
+          )}
+          {/* 場景預設 — 一鍵自動模擬 */}
+          <div style={{display:"flex",gap:4,flexWrap:"wrap",marginTop:4}}>
+            <span style={{color:"#64748b",fontSize:11,alignSelf:"center",marginRight:4}}>場景：</span>
+            {SCENARIOS.map(sc => (
+              <button key={sc.name} onClick={() => runScenario(sc)} style={S.scenarioBtn} title={sc.desc}>
+                {sc.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -952,6 +1227,32 @@ export default function App() {
     return () => clearTimeout(t);
   }, [form, page, editingId]);
 
+  // 鍵盤快捷鍵 — 用 ref 確保始終拿到最新的 handler（避免閉包 form 過期）
+  // 注意：kbRef.current 會在 handleSave/handleUpdate 定義後賦值（見下方）
+  const kbRef = useRef({});
+  useEffect(() => {
+    const onKey = (e) => {
+      const s = kbRef.current;
+      if (!s.handleSave) return; // 尚未初始化
+      if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+        e.preventDefault();
+        if (s.page === "form" && !s.saving) { s.editingId ? s.handleUpdate() : s.handleSave(); }
+      }
+      else if ((e.ctrlKey || e.metaKey) && e.key === "n" && !e.shiftKey) {
+        e.preventDefault();
+        setPage("form"); setForm({ ...EMPTY }); setEditingId(null); setErrors({}); setTouched({});
+      }
+      else if (e.key === "Escape") {
+        if (s.delConfirm) { setDelConfirm(null); return; }
+        if (s.showCompare) { setShowCompare(false); return; }
+        if (s.page === "detail") setPage("history");
+        else if (s.page === "customerDetail") setPage("customers");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const restoreDraft = () => {
     const d = loadDraft();
     if (d && d.form) { setForm(d.form); setDraftAvailable(false); showToast("已還原草稿"); }
@@ -1059,34 +1360,12 @@ export default function App() {
       showToast("紀錄已更新！"); done(); fetchRecords();
     } setSaving(false);
   };
-
-  const kbRef = useRef({});
-  kbRef.current = { handleSave, handleUpdate, editingId, page, saving, delConfirm, showCompare };
-  useEffect(() => {
-    const onKey = (e) => {
-      const s = kbRef.current;
-      if ((e.ctrlKey || e.metaKey) && e.key === "s") {
-        e.preventDefault();
-        if (s.page === "form" && !s.saving) { s.editingId ? s.handleUpdate() : s.handleSave(); }
-      }
-      else if ((e.ctrlKey || e.metaKey) && e.key === "n" && !e.shiftKey) {
-        e.preventDefault();
-        setPage("form"); setForm({ ...EMPTY }); setEditingId(null); setErrors({}); setTouched({});
-      }
-      else if (e.key === "Escape") {
-        if (s.delConfirm) { setDelConfirm(null); return; }
-        if (s.showCompare) { setShowCompare(false); return; }
-        if (s.page === "detail") setPage("history");
-        else if (s.page === "customerDetail") setPage("customers");
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
   const errFor = f => (touched[f] && errors[f]) ? errors[f] : null;
   const missingN = Object.keys(REQUIRED).filter(k => !form[k] || !form[k].toString().trim()).length;
   const parseSymptoms = rec => safeParseSymptoms(rec?.symptoms);
+
+  // 將最新 handler 寫入 kbRef（此時 handleSave/handleUpdate 都已定義）
+  kbRef.current = { handleSave, handleUpdate, editingId, page, saving, delConfirm, showCompare };
 
   // ─── FORM ───
   const renderForm = () => (
@@ -1455,6 +1734,11 @@ const S={
   missBadge:{background:"#0f172a44",padding:"2px 10px",borderRadius:8,fontSize:11,fontWeight:600},
   bumpBtn:{padding:"8px 16px",background:"linear-gradient(135deg,#f59e0b,#d97706)",border:"none",borderRadius:8,color:"#0f172a",fontSize:13,fontWeight:700,cursor:"pointer",boxShadow:"0 2px 12px #f59e0b44"},
   contBumpBtn:{padding:"8px 12px",background:"#1e293b",border:"1px solid #3b82f666",borderRadius:8,color:"#93c5fd",fontSize:14,fontWeight:700,cursor:"pointer"},
+  driveCtrl:{marginTop:10,padding:"10px 12px",background:"#0f172a",border:"1px solid #1e293b",borderRadius:10},
+  driveToggle:{padding:"6px 14px",background:"#1e293b",border:"1px solid #22c55e66",borderRadius:8,color:"#86efac",fontSize:12,fontWeight:700,cursor:"pointer",transition:"all 0.15s"},
+  roadChip:{padding:"4px 10px",background:"#0f172a",border:"1px solid #1e293b",borderRadius:6,color:"#94a3b8",fontSize:11,fontWeight:600,cursor:"pointer",transition:"all 0.15s"},
+  actionBtn:{padding:"4px 10px",background:"#0f172a",border:"1px solid #334155",borderRadius:6,color:"#cbd5e1",fontSize:11,fontWeight:600,cursor:"pointer"},
+  scenarioBtn:{padding:"4px 10px",background:"#111827",border:"1px solid #334155",borderRadius:6,color:"#94a3b8",fontSize:11,fontWeight:600,cursor:"pointer",transition:"all 0.15s"},
   toggleBtn:{background:"transparent",border:"1px solid #1e293b",borderRadius:6,color:"#64748b",padding:"4px 12px",fontSize:12,cursor:"pointer"},
   presetBtn:{background:"#0f172a",border:"1px solid #1e293b",borderRadius:10,padding:"10px 16px",cursor:"pointer",color:"#e2e8f0",textAlign:"left",minWidth:160},
   exportBtn:{background:"#1e293b",border:"1px solid #334155",borderRadius:8,color:"#e2e8f0",padding:"6px 14px",fontSize:13,fontWeight:600,cursor:"pointer"},
